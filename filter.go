@@ -109,6 +109,10 @@ type PacketFilter struct {
 	batchSize  int
 	bufPool    sync.Pool
 
+	// Reused by readBatch, which only the loop goroutine calls.
+	batch  []ipv4.Message
+	result []messageWithError
+
 	conns []*filteredConn
 	mut   sync.Mutex
 }
@@ -196,12 +200,17 @@ func (d *PacketFilter) readFrom() []messageWithError {
 }
 
 func (d *PacketFilter) readBatch() []messageWithError {
-	batch := make([]ipv4.Message, d.batchSize)
+	if d.batch == nil {
+		d.batch = make([]ipv4.Message, d.batchSize)
+		d.result = make([]messageWithError, d.batchSize)
+	}
+	batch := d.batch
 	for i := range batch {
-		buf := d.bufPool.Get().([]byte)
-		oobBuf := d.bufPool.Get().([]byte)
-		batch[i].Buffers = [][]byte{buf}
-		batch[i].OOB = oobBuf
+		// Buffers is new each time because a queued message keeps it.
+		batch[i] = ipv4.Message{
+			Buffers: [][]byte{d.bufPool.Get().([]byte)},
+			OOB:     d.bufPool.Get().([]byte),
+		}
 	}
 
 	n, err := d.ipv4Conn.ReadBatch(batch, 0)
@@ -217,7 +226,7 @@ func (d *PacketFilter) readBatch() []messageWithError {
 		n = 1
 	}
 
-	result := make([]messageWithError, n)
+	result := d.result[:n]
 
 	for i := 0; i < n; i++ {
 		result[i].Err = err
